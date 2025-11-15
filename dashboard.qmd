@@ -1,13 +1,6 @@
 ---
-title: "Gerrymandering Dashboard"
-format:
-  html:
-    layout: dashboard
-    theme: cosmo
-    toc: true
-  pdf:
-    documentclass: scrreprt
-    keep-tex: true
+title: "Gerrymandering Dashboard (PDF Version)"
+format: typst
 execute:
   echo: true
   warning: false
