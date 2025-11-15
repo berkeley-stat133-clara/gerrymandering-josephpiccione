@@ -1,28 +1,68 @@
 ---
-title: Exploratory Data Analysis
+title: "Exploratory Data Analysis"
 format: typst
+execute:
+  echo: true
+  warning: false
+  message: false
 ---
 
-### Question 1
+```{r}
+library(tidyverse)
 
-Put your question here.
+# Load cleaned data (or raw if not cleaned yet)
+sov <- read_csv("data/g24_sov_by_g24_svprec.csv", show_col_types = FALSE)
+
+# Ensure numeric vote columns
+sov <- sov |>
+  mutate(
+    CNGDEM01 = as.numeric(CNGDEM01),
+    CNGREP01 = as.numeric(CNGREP01),
+    total_votes = CNGDEM01 + CNGREP01,
+    margin = abs(CNGDEM01 - CNGREP01)
+  )
+```
+
+### Question 1
+**Which precincts had the closest congressional races in 2024?**
 
 ### Answer 1
 
-Put your answer here.
+Below are the top 5 closest precincts (margin = 0):
+
+```{r}
+closest_precincts <- sov |>
+  filter(total_votes > 0) |>
+  arrange(margin) |>
+  slice(1:5)
+
+closest_precincts
+```
 
 ### Question 2
-
-Put your question here.
+**Which congressional districts had the largest winning margins?**
 
 ### Answer 2
 
-Put your answer here.
+```{r}
+district_margins <- sov |>
+  group_by(CDDIST) |>
+  summarise(
+    d_votes = sum(CNGDEM01, na.rm = TRUE),
+    r_votes = sum(CNGREP01, na.rm = TRUE),
+    margin = abs(d_votes - r_votes)
+  ) |>
+  filter(CDDIST != 0) |>
+  arrange(desc(margin))
+
+district_margins |> slice(1:5)
+```
 
 ### Question 3
-
-Put your question here.
+**What is the distribution of precinct sizes (by total registration)?**
 
 ### Answer 3
 
-Put your answer here.
+```{r}
+summary(sov$TOTREG)
+```

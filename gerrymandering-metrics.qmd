@@ -1,11 +1,207 @@
 ---
-title: Gerrymandering Metrics
+title: "Gerrymandering Metrics"
 format: typst
+execute:
+  echo: true
+  warning: false
+  message: false
 ---
 
-### 2024 Election Results and the 2024 District Map
+# Introduction
 
+In this document I compute two standard gerrymandering metrics for the
+2024 U.S. House elections in California:
 
+- the **mean–median score**, and  
+- the **efficiency gap**.
 
-### 2024 Election Results and the proposed 2025 District Map
+I do this twice:
+
+1. Using the **actual 2024 congressional district map**, and  
+2. Using the **proposed AB 604 congressional district map**, based on the
+   area-weighted reallocation of votes created in `data-cleaning.qmd`
+   (saved as `data/newmap-district-votes.csv`).
+
+All calculations are based on Democratic vs. Republican vote totals in the
+congressional race, using the `cngdem01` and `cngrep01` columns.
+
+```{r}
+library(tidyverse)
+library(janitor)
+```
+
+# Helper Functions
+
+To keep things readable, I define a couple of small helper functions for the
+two gerrymandering metrics.
+
+```{r}
+# Given vectors of Democratic and Republican votes by district,
+# return the mean–median score for Democratic vote share.
+mean_median_score <- function(d_votes, r_votes) {
+  total <- d_votes + r_votes
+  share <- d_votes / total
+  mean(share, na.rm = TRUE) - median(share, na.rm = TRUE)
+}
+
+# Given vectors of Democratic and Republican votes by district,
+# return the efficiency gap (Democratic perspective).
+efficiency_gap <- function(d_votes, r_votes) {
+  total <- d_votes + r_votes
+  threshold <- floor(total / 2) + 1      # votes needed to win
+  d_wins <- d_votes > r_votes
+
+  wasted_d <- ifelse(d_wins, d_votes - threshold, d_votes)
+  wasted_r <- ifelse(d_wins, r_votes, r_votes - threshold)
+
+  sum(wasted_d - wasted_r, na.rm = TRUE) / sum(total, na.rm = TRUE)
+}
+```
+
+# 2024 Election Results and the 2024 District Map
+
+## District-Level Votes Under the 2024 Map
+
+First I load the cleaned SV-precinct data (`clean-sov.csv`) and aggregate
+Democratic and Republican congressional votes by 2024 congressional district
+(`cddist`).
+
+```{r}
+sov <- read_csv("data/clean-sov.csv", show_col_types = FALSE) |>
+  clean_names()
+
+district_2024 <- sov |>
+  group_by(cddist) |>
+  summarise(
+    d_votes = sum(cngdem01, na.rm = TRUE),
+    r_votes = sum(cngrep01, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  # Drop districts with no two-party votes (just in case)
+  filter(d_votes + r_votes > 0)
+
+district_2024
+```
+
+## Seats Won Under the 2024 Map
+
+```{r}
+seats_dem_2024 <- sum(district_2024$d_votes > district_2024$r_votes, na.rm = TRUE)
+seats_rep_2024 <- sum(district_2024$r_votes > district_2024$d_votes, na.rm = TRUE)
+
+tibble(
+  plan  = "2024 Map",
+  dem_seats = seats_dem_2024,
+  rep_seats = seats_rep_2024
+)
+```
+
+## Mean–Median Score for the 2024 Map
+
+The **mean–median score** is:
+
+\[
+\text{MM} = \bar{s} - \text{median}(s)
+\]
+
+where \(s\) is the Democratic vote share in each district. Positive values
+indicate that the mean share is higher than the median share, which can be
+consistent with a map that "packs" Democrats into fewer districts.
+
+```{r}
+mm_2024 <- with(district_2024,
+                mean_median_score(d_votes, r_votes))
+
+mm_2024
+```
+
+## Efficiency Gap for the 2024 Map
+
+The **efficiency gap** compares the total wasted votes for each party:
+
+- In districts Democrats win: Democratic wasted votes are
+  \( \text{DemVotes} - (\lfloor \tfrac{1}{2}T \rfloor + 1) \) and Republicans
+  waste all their votes.
+- In districts Republicans win: the reverse is true.
+
+The efficiency gap (from the Democratic perspective) is:
+
+\[
+\text{EG} = \frac{\text{Wasted}_D - \text{Wasted}_R}{\text{Total Votes}}
+\]
+
+```{r}
+eg_2024 <- with(district_2024,
+                efficiency_gap(d_votes, r_votes))
+
+eg_2024
+```
+
+# 2024 Election Results and the Proposed 2025 District Map (AB 604)
+
+For the proposed AB 604 map, I use the area-weighted results computed in
+`data-cleaning.qmd` and saved as `data/newmap-district-votes.csv`. This file
+contains one row per new district with the columns:
+
+- `new_cdd`  – new congressional district ID
+- `d_votes`  – estimated Democratic votes
+- `r_votes`  – estimated Republican votes
+
+```{r}
+newmap_district_votes <- read_csv("data/newmap-district-votes.csv",
+                                  show_col_types = FALSE)
+
+newmap_district_votes
+```
+
+## Seats Won Under the Proposed AB 604 Map
+
+```{r}
+seats_dem_ab604 <- sum(newmap_district_votes$d_votes > newmap_district_votes$r_votes,
+                       na.rm = TRUE)
+seats_rep_ab604 <- sum(newmap_district_votes$r_votes > newmap_district_votes$d_votes,
+                       na.rm = TRUE)
+
+tibble(
+  plan  = "AB 604 Map",
+  dem_seats = seats_dem_ab604,
+  rep_seats = seats_rep_ab604
+)
+```
+
+## Mean–Median Score for the AB 604 Map
+
+```{r}
+mm_ab604 <- with(newmap_district_votes,
+                 mean_median_score(d_votes, r_votes))
+
+mm_ab604
+```
+
+## Efficiency Gap for the AB 604 Map
+
+```{r}
+eg_ab604 <- with(newmap_district_votes,
+                 efficiency_gap(d_votes, r_votes))
+
+eg_ab604
+```
+
+# Comparison of 2024 Map vs. AB 604 Map
+
+Finally, I summarize the results for both the current (2024) map and the
+proposed AB 604 map side by side.
+
+```{r}
+comparison <- tibble(
+  plan          = c("2024 Map", "AB 604 Map"),
+  dem_seats     = c(seats_dem_2024, seats_dem_ab604),
+  rep_seats     = c(seats_rep_2024, seats_rep_ab604),
+  mean_median   = c(mm_2024, mm_ab604),
+  efficiency_gap = c(eg_2024, eg_ab604)
+)
+
+comparison
+```
+
 

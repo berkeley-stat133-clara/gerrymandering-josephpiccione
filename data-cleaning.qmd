@@ -1,5 +1,360 @@
 ---
-title: Data Cleaning
+title: "Data Cleaning"
 format: typst
+execute:
+  echo: true
+  warning: false
+  message: false
 ---
+
+# Introduction
+
+In this document, I clean the **2024 General Election Statement of Vote (SOV)** data at the
+SV (split-voting) precinct level and prepare additional datasets for re-running the 2024
+election under a new congressional district map.
+
+The main goals are to create:
+
+- A cleaned SV-precinct SOV file for exploratory analysis and gerrymandering metrics.
+- A cleaned SR-precinct SOV + geometry dataset for **Approach A (area-weighted interpolation)**
+  used to simulate the 2024 election under the **AB 604** proposed map.
+
+Original files used here:
+
+- `data/g24_sov_by_g24_svprec.csv` – SV precinct SOV (2024 General).
+- `data/shapefiles/state_g24_sov_data_by_g24_srprec.csv` – SR precinct SOV (2024 General).
+- Shapefiles for SR precincts: `data/shapefiles/srprec_state_g24_v01_shp/srprec_state_g24_v01_shp.shp` (+ .dbf, .shx, .prj, .cpg).
+- Shapefiles for proposed AB 604 congressional districts: `data/shapefiles/AB604/AB604.shp` (+ .dbf, .shx, .prj).
+
+Cleaned output files from this document:
+
+- `data/clean-sov.csv` – cleaned SV precinct SOV.
+- `data/newmap-district-votes.csv` – district-level vote totals under AB 604 (via Approach A).
+
+# Setup
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(sf)
+```
+
+# Part 2: Cleaning SV Precinct SOV Data
+
+## Read and Inspect Raw Data
+
+```{r}
+# Read in the raw precinct-level statement of vote (SV precincts)
+sov_raw <- read_csv("data/g24_sov_by_g24_svprec.csv",
+                    show_col_types = FALSE)
+
+# Quick look at the structure
+glimpse(sov_raw)
+
+# Peek at the first few rows
+head(sov_raw)
+```
+
+## Clean Column Names
+
+```{r}
+# Make all column names lower_snake_case and easier to work with
+sov <- sov_raw |>
+  clean_names()
+
+# Check the cleaned names
+names(sov)
+```
+
+## Fix Column Types (Vote Columns)
+
+The SOV file sometimes stores vote totals as character because of non-numeric
+characters (commas, blanks, etc.). Here I identify vote columns and coerce them
+to numeric using `parse_number()`.
+
+```{r}
+# Identify columns that look like vote counts for major contests
+vote_cols <- names(sov)[grepl("^cng|^sen|^usp|yes$|no$", names(sov))]
+
+vote_cols
+```
+
+```{r}
+# Convert vote columns to numeric, stripping out any stray characters
+sov <- sov |>
+  mutate(across(all_of(vote_cols), ~ parse_number(.x)))
+
+# Sanity check: summary of a few vote columns
+sov |>
+  select(all_of(vote_cols)) |>
+  summary()
+```
+
+## Check Key Columns and Basic Integrity
+
+Here I run a few basic checks:
+
+- `svprec_key` should uniquely identify each row.
+- `cddist` (congressional district) should be in a reasonable range.
+- Registration totals (if present) should be non-negative.
+
+```{r}
+# Check uniqueness of the split-precinct key
+any(duplicated(sov$svprec_key))  # Should be FALSE
+sum(duplicated(sov$svprec_key))
+```
+
+```{r}
+# Check congressional district values (if present)
+if ("cddist" %in% names(sov)) {
+  summary(sov$cddist)
+  unique(sort(sov$cddist))
+}
+```
+
+```{r}
+# If a registration column exists (e.g., totreg), check basic properties
+if ("totreg" %in% names(sov)) {
+  summary(sov$totreg)
+  sum(sov$totreg < 0, na.rm = TRUE)
+}
+```
+
+Optionally, we can check that candidate vote totals do not exceed total registration
+in obviously impossible ways (this is a rough sanity check, not a hard rule, since
+registration and turnout differ):
+
+```{r}
+if (all(c("cngdem01", "cngrep01", "totreg") %in% names(sov))) {
+  sov |>
+    mutate(
+      total_cng_votes = cngdem01 + cngrep01
+    ) |>
+    summarise(
+      max_votes = max(total_cng_votes, na.rm = TRUE),
+      max_reg   = max(totreg, na.rm = TRUE)
+    )
+}
+```
+
+## Add Convenience Variables and Save Cleaned SV Precinct Data
+
+At this point:
+
+- Column names are standardized.
+- Vote columns have been coerced to numeric.
+- Basic integrity checks have been performed.
+
+I also create a couple of convenience variables for later use:
+
+- `total_votes` – two-party total (Dem + Rep) for the main congressional race.
+- `margin` – Democratic minus Republican votes in that race.
+
+```{r}
+sov <- sov |>
+  mutate(
+    total_votes = cngdem01 + cngrep01,
+    margin = cngdem01 - cngrep01
+  )
+
+# Save cleaned SV-precinct SOV
+write_csv(sov, "data/clean-sov.csv")
+```
+
+The file `data/clean-sov.csv` will be the cleaned dataset used in:
+
+- `exploratory-data-analysis.qmd`
+- `gerrymandering-metrics.qmd`
+- As a reference for totals in later parts of the project.
+
+# Part 5: Re-running the 2024 Election (Approach A: Area-Weighted Interpolation)
+
+In this section, I prepare the data needed to simulate the 2024 election under
+the proposed AB 604 congressional map using **area-weighted interpolation**.
+
+The basic idea:
+
+1. Work at the **SR precinct** level (geographic precincts).
+2. Attach SOV vote totals to SR precinct geometries.
+3. Overlay SR precincts with the proposed AB 604 district polygons.
+4. For each overlapping piece, compute the fraction of the SR precinct area
+   that lies in each new district.
+5. Allocate votes proportionally to that area share.
+6. Sum allocated votes within each new district.
+
+## Read SR Precinct Vote Data
+
+```{r}
+# Read SR precinct-level SOV data (2024 General)
+sr_votes_raw <- read_csv("data/shapefiles/state_g24_sov_data_by_g24_srprec.csv",
+                         show_col_types = FALSE)
+
+glimpse(sr_votes_raw)
+```
+
+```{r}
+# Clean column names
+sr_votes <- sr_votes_raw |>
+  clean_names()
+
+names(sr_votes)
+```
+
+As with the SV data, the SR SOV may store vote totals as character. We apply a
+similar numeric conversion.
+
+```{r}
+# Identify vote columns in the SR SOV
+sr_vote_cols <- names(sr_votes)[grepl("^cng|^sen|^usp|yes$|no$", names(sr_votes))]
+
+sr_vote_cols
+```
+
+```{r}
+# Convert SR vote columns to numeric
+sr_votes <- sr_votes |>
+  mutate(across(all_of(sr_vote_cols), ~ parse_number(.x)))
+
+# Quick sanity check
+sr_votes |>
+  select(all_of(sr_vote_cols)) |>
+  summary()
+```
+
+## Load SR Precinct Shapefiles and Fix Geometry
+
+```{r}
+# Read SR precinct shapefile
+sr_shp_raw <- st_read("data/shapefiles/srprec_state_g24_v01_shp /srprec_state_g24_v01_shp.shp",
+                      quiet = TRUE) |>
+  clean_names()
+
+sr_shp_raw
+```
+
+Apply the geometry fixes recommended in the assignment:
+
+```{r}
+sr_shp <- sr_shp_raw |>
+  st_transform(3310) |>      # equal-area projection
+  st_set_precision(1) |>     # snap to 1 m grid
+  st_make_valid() |>         # fix bow-ties/self-intersections
+  st_collection_extract("POLYGON")
+
+sr_shp
+```
+
+## Join SR Votes to SR Geometry
+
+Both the SOV and the shapefile share an SR precinct key (`SRPREC_KEY` in the
+raw data, which becomes `srprec_key` after `clean_names()`).
+
+```{r}
+# Inspect potential join keys
+names(sr_shp)
+names(sr_votes)
+```
+
+```{r}
+# Join SR vote data to SR geometries using srprec_key
+sr <- sr_shp |>
+  left_join(sr_votes, by = "srprec_key")
+
+# Sanity check: did we lose observations?
+nrow(sr_shp)
+nrow(sr)
+```
+
+## Load Proposed AB 604 Congressional Map
+
+```{r}
+# Read AB 604 congressional district shapefile
+new_map_raw <- st_read("data/shapefiles/AB604/AB604.shp",
+                       quiet = TRUE) |>
+  clean_names()
+
+new_map_raw
+names(new_map_raw)
+```
+
+Reproject to the same CRS as the SR layer (EPSG:3310):
+
+```{r}
+new_map <- new_map_raw |>
+  st_transform(3310)
+
+st_crs(sr)
+st_crs(new_map)
+```
+
+You should see matching CRS for both objects.
+
+## Compute Area-Weighted Intersections
+
+```{r}
+# Add SR precinct area column (in projected CRS)
+sr_with_area <- sr |>
+  mutate(sr_area = st_area(geometry))
+
+# Intersect SR precincts with new districts
+sr_new_intersection <- st_intersection(
+  sr_with_area,
+  new_map |>
+    select(new_cdd = district)
+)
+
+sr_new_intersection
+```
+
+Compute the share of each SR precinct’s area that lies within each new district:
+
+```{r}
+sr_new_intersection <- sr_new_intersection |>
+  mutate(
+    part_area = st_area(geometry),
+    weight = as.numeric(part_area / sr_area)
+  )
+
+summary(sr_new_intersection$weight)
+```
+
+The `weight` column is the fraction of each SR precinct assigned to each new district.
+
+## Allocate Votes to New Districts (Area-Weighted)
+
+We now multiply each SR precinct’s votes by the `weight` to allocate them to new
+districts, and then sum within each new district.
+
+Here we demonstrate this for the main congressional race columns `cngdem01`
+and `cngrep01`. You can expand this to other contests if needed.
+
+```{r}
+# Make sure the main congressional vote columns exist
+c("cngdem01", "cngrep01") %in% names(sr_new_intersection)
+```
+
+```{r}
+# Drop geometry and aggregate votes to new districts
+newmap_district_votes <- sr_new_intersection |>
+  st_drop_geometry() |>
+  group_by(new_cdd) |>
+  summarise(
+    d_votes = sum(cngdem01 * weight, na.rm = TRUE),
+    r_votes = sum(cngrep01 * weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+newmap_district_votes
+```
+
+These `d_votes` and `r_votes` are the **area-weighted estimates of total Democratic
+and Republican votes for each new AB 604 congressional district**.
+
+## Save New District Vote Totals
+
+```{r}
+write_csv(newmap_district_votes, "data/newmap-district-votes.csv")
+```
+
 

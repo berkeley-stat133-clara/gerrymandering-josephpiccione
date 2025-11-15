@@ -1,0 +1,6 @@
+# ignore data folder (raw SOV files, shapefiles, etc.)
+data/
+
+
+# OS-generated junk
+.DS_Store
